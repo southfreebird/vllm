@@ -12,15 +12,26 @@ from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
-MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
 GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
 
 
 @pytest.fixture(scope="module")
-def llm():
+def llm(request):
+
+    def get_llm_kwargs(mode: str):
+        if mode == "regular":
+            return {"model": "Qwen/Qwen2.5-7B-Instruct"}
+        return {
+            "model": "neuralmagic/Meta-Llama-3.1-8B-Instruct-FP8",
+            "speculative_model": "turboderp/Qwama-0.5B-Instruct",
+            "num_speculative_tokens": 5,
+            # "enforce_eager": True,
+        }
+
+    test_llm_kwargs = get_llm_kwargs(request.param)
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
-    llm = LLM(model=MODEL_NAME, max_model_len=1024)
+    llm = LLM(**test_llm_kwargs, max_model_len=1024)
 
     with llm.deprecate_legacy_api():
         yield weakref.proxy(llm)
@@ -29,6 +40,8 @@ def llm():
 
 
 @pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("llm", ["spec"], indirect=True)
+# @pytest.mark.parametrize("llm", ["spec", "regular"], indirect=True)
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 def test_guided_regex(sample_regex, llm, guided_decoding_backend: str):
     sampling_params = SamplingParams(temperature=0.8,
@@ -55,6 +68,8 @@ def test_guided_regex(sample_regex, llm, guided_decoding_backend: str):
 
 
 @pytest.mark.skip_global_cleanup
+# @pytest.mark.parametrize("llm", ["spec", "regular"], indirect=True)
+@pytest.mark.parametrize("llm", ["spec"], indirect=True)
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 def test_guided_json_completion(sample_json_schema, llm,
                                 guided_decoding_backend: str):
@@ -85,6 +100,8 @@ def test_guided_json_completion(sample_json_schema, llm,
 
 
 @pytest.mark.skip_global_cleanup
+# @pytest.mark.parametrize("llm", ["spec", "regular"], indirect=True)
+@pytest.mark.parametrize("llm", ["spec"], indirect=True)
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 def test_guided_complex_json_completion(sample_complex_json_schema, llm,
                                         guided_decoding_backend: str):
@@ -116,6 +133,8 @@ def test_guided_complex_json_completion(sample_complex_json_schema, llm,
 
 
 @pytest.mark.skip_global_cleanup
+# @pytest.mark.parametrize("llm", ["spec", "regular"], indirect=True)
+@pytest.mark.parametrize("llm", ["spec"], indirect=True)
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 def test_guided_definition_json_completion(sample_definition_json_schema, llm,
                                            guided_decoding_backend: str):
@@ -147,6 +166,8 @@ def test_guided_definition_json_completion(sample_definition_json_schema, llm,
 
 
 @pytest.mark.skip_global_cleanup
+# @pytest.mark.parametrize("llm", ["spec", "regular"], indirect=True)
+@pytest.mark.parametrize("llm", ["spec"], indirect=True)
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 def test_guided_choice_completion(sample_guided_choice, llm,
                                   guided_decoding_backend: str):
@@ -173,6 +194,8 @@ def test_guided_choice_completion(sample_guided_choice, llm,
 
 
 @pytest.mark.skip_global_cleanup
+# @pytest.mark.parametrize("llm", ["spec", "regular"], indirect=True)
+@pytest.mark.parametrize("llm", ["spec"], indirect=True)
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 def test_guided_grammar(sample_sql_statements, llm,
                         guided_decoding_backend: str):
@@ -212,6 +235,7 @@ def test_guided_grammar(sample_sql_statements, llm,
 
 
 @pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("llm", ["regular"], indirect=True)
 def test_guided_options_request_deprecation_warning(sample_regex, llm):
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
@@ -223,6 +247,7 @@ def test_guided_options_request_deprecation_warning(sample_regex, llm):
 
 
 @pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("llm", ["regular"], indirect=True)
 def test_validation_against_both_guided_decoding_options(sample_regex, llm):
     sampling_params = SamplingParams(
         temperature=0.8,
@@ -237,6 +262,8 @@ def test_validation_against_both_guided_decoding_options(sample_regex, llm):
 
 
 @pytest.mark.skip_global_cleanup
+# @pytest.mark.parametrize("llm", ["regular", "spec"], indirect=True)
+@pytest.mark.parametrize("llm", ["spec"], indirect=True)
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 def test_guided_json_object(llm, guided_decoding_backend: str):
     sampling_params = SamplingParams(temperature=1.0,
