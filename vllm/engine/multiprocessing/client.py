@@ -638,8 +638,7 @@ class MQLLMEngineClient(EngineClient):
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     prompt_adapter_request=prompt_adapter_request,
-                    priority=priority,
-                ))
+                    priority=priority))
 
             # 3) Send the RPCGenerateRequest to the MQLLMEngine.
             parts = (request_bytes,
