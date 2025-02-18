@@ -570,12 +570,14 @@ class MQLLMEngineClient(EngineClient):
 
         return cast(
             AsyncGenerator[PoolingRequestOutput, None],
-            self._process_request(prompt,
-                                  pooling_params,
-                                  request_id,
-                                  lora_request,
-                                  trace_headers,
-                                  priority=priority))
+            self._process_request(
+                prompt,
+                pooling_params,
+                request_id,
+                lora_request,
+                trace_headers,
+                priority=priority,
+            ))
 
     async def _process_request(
         self,
