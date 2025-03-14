@@ -6,6 +6,7 @@ import torch
 
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.guided_decoding.xgrammar_decoding import XGrammarLogitsProcessor
 
 try:
     try:
@@ -68,7 +69,6 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         assert sampling_metadata.selected_token_indices.shape == (
             num_queries, )
         # assert sampling_metadata.categorized_sample_indices == TODO: Add if needed # noqa: E501
-
         # Verify that all sequences are decodes
         for i in range(num_queries):
             seq_group = sampling_metadata.seq_groups[i]
@@ -77,12 +77,14 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             assert seq_group.prompt_logprob_indices == []  # No prompt
             assert seq_group.sample_indices == [i]  # Simple
 
-            # Add draft tokens to output. Needed for structurial output
+            # Add draft tokens to the output for structural output only
+            logits_processors = seq_group.sampling_params.logits_processors
             for seq_id in seq_group.seq_ids:
-                seq_group.seq_data[seq_id].output_token_ids = (
-                    *seq_group.seq_data[seq_id].output_token_ids,
-                    sampled_token_ids[i],
-                )
+                if not logits_processors is None:
+                    seq_group.seq_data[seq_id].output_token_ids = (
+                        *seq_group.seq_data[seq_id].output_token_ids,
+                        sampled_token_ids[i],
+                    )
 
     def _gpu_advance_step(self, model_input: ModelRunnerInputBase,
                           last_output: SamplerOutput) -> ModelRunnerInputBase:
