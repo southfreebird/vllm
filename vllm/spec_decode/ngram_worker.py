@@ -87,6 +87,8 @@ class NGramWorker(NonLLMProposerWorkerBase):
         for idx, seq_group_metadata in enumerate(
                 execute_model_req.seq_group_metadata_list):
             seq_data = next(iter(seq_group_metadata.seq_data.values()))
+            # logits_processors = seq_group_metadata.sampling_params.logits_processors
+            # print(idx, type(logits_processors[0]) if logits_processors is not None else None)
 
             seq_len = seq_data.get_len()
             # When seq_len is less than 3072 (3K), we use CPU to perform

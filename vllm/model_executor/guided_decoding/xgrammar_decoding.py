@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, List, Optional
 
@@ -43,11 +44,12 @@ def get_local_xgrammar_guided_decoding_logits_processor(
         reasoner: Reasoner | None,
         speculative_config: Optional[SpeculativeConfig] = None,
         max_threads: int = 8):
-    config = GrammarConfig.from_guided_params(guided_params=guided_params,
-                                              model_config=model_config,
-                                              tokenizer=tokenizer,
-                                              speculative_config=speculative_config,
-                                              max_threads=max_threads)
+    config = GrammarConfig.from_guided_params(
+        guided_params=guided_params,
+        model_config=model_config,
+        tokenizer=tokenizer,
+        speculative_config=speculative_config,
+        max_threads=max_threads)
     return XGrammarLogitsProcessor(config, reasoner)
 
 
@@ -303,6 +305,30 @@ class GrammarConfig:
         return grammar
 
 
+def _find_last_match(last_n_tokens: list[int], input_tokens: list[int]) -> int:
+    n = len(last_n_tokens)
+    inp_seq_n = len(input_tokens)
+    # TODO: Change me!
+    num_spec_tokens = 5
+
+    if n == 0:
+        return 0
+
+    for match_len in range(n + num_spec_tokens, 0, -1):
+        sub_last_n_tokens = last_n_tokens[:match_len]
+        last_idx = min(inp_seq_n, inp_seq_n - match_len + n)
+        sub_input_tokens = input_tokens[-match_len:last_idx]
+
+        # print(
+        # , sub_input_tokens)
+        if sub_input_tokens == sub_last_n_tokens:
+            return n - match_len
+
+    return -1
+
+    # raise ValueError("Number of rollback tokens exceed max_rollback_tokens")
+
+
 @dataclass
 class XGrammarLogitsProcessor:
     """Wrapper class to support pickle protocol"""
@@ -313,7 +339,9 @@ class XGrammarLogitsProcessor:
     token_bitmask: torch.Tensor = None  # type: ignore[assignment]
     matchers: list[xgr.GrammarMatcher] = field(default_factory=list)
     batch_size: int = field(default=1)
-    num_processed_tokens: list[int] = field(default_factory=list)
+    skip_tokens_until_rollback: bool = field(default=False)
+    last_n_tokens: list[deque] = field(default_factory=list)
+    num_processed_tokens: int = field(default=0)
 
     def __getstate__(self) -> dict[str, Any]:
         return {'config': self.config, 'reasoner': self.reasoner}
@@ -326,7 +354,9 @@ class XGrammarLogitsProcessor:
         self.matchers = []
         self.batch_size = 1
         self.token_bitmask = None  # type: ignore[assignment]
-        self.num_processed_tokens = []
+        self.skip_tokens_until_rollback = False
+        self.last_n_tokens = []
+        self.num_processed_tokens = 0
 
     def _ensure_ctx(self):
         """Lazily initialize the processor in the worker process"""
@@ -366,23 +396,47 @@ class XGrammarLogitsProcessor:
                                    max_rollback_tokens=max_rollback_tokens)
                 for _ in range(self.batch_size)
             ]
-            self.num_processed_tokens = [0 for _ in range(self.batch_size)]
+            self.last_n_tokens = [
+                deque(maxlen=max_rollback_tokens + 1)
+                for _ in range(self.batch_size)
+            ]
             self.token_bitmask = xgr.allocate_token_bitmask(
                 self.batch_size, self.config.vocab_size)
 
         for i in range(len(self.matchers)):
-            if self.num_processed_tokens[i] > 0 and self.num_processed_tokens[
-                    i] >= len(input_ids):
-                diff = self.num_processed_tokens[i] - len(input_ids) + 1
-                self.num_processed_tokens[i] -= diff
+            diff = _find_last_match(tuple(self.last_n_tokens[i]),
+                                    input_ids[:-1])
+            print("diff:", diff)
+            if diff >= 0:
                 self.matchers[i].rollback(diff)
+                for _ in range(diff):
+                    self.last_n_tokens[i].pop()
+                self.skip_tokens_until_rollback = False
+                self.num_processed_tokens -= diff
 
+        print(self.skip_tokens_until_rollback, self.num_processed_tokens,
+              len(input_ids), list(self.last_n_tokens[i]), input_ids[-10:])
+
+        if len(input_ids) - self.num_processed_tokens > 10:
+            raise
+
+        spec_decoding_scoring = False
         if len(input_ids) > 0:
             for i, matcher in enumerate(self.matchers):
-                if not matcher.is_terminated():
-                    self.num_processed_tokens[i] += 1
+                if not matcher.is_terminated(
+                ) and not self.skip_tokens_until_rollback:
                     sampled_token = input_ids[-1]
-                    assert self.matchers[i].accept_token(sampled_token)
+                    token_match = self.matchers[i].accept_token(sampled_token)
+                    if not token_match and spec_decoding_scoring:
+                        self.skip_tokens_until_rollback = True
+                        print(f"Token {sampled_token} did not accepted!")
+                    else:
+                        assert token_match
+                        self.last_n_tokens[i].append(sampled_token)
+                        self.num_processed_tokens += 1
+
+        if self.skip_tokens_until_rollback:
+            return scores
 
         for i, matcher in enumerate(self.matchers):
             if not matcher.is_terminated():

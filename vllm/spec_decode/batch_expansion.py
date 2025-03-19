@@ -77,6 +77,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
              proposal_lens_list=proposal_lens_list,
          )
 
+        print("Start scorer:", proposal_token_ids_list)
         target_sampler_output = self._scorer_worker.execute_model(
             execute_model_req=execute_model_req.clone(
                 seq_group_metadata_list=target_seq_group_metadata_list))
