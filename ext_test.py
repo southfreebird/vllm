@@ -23,11 +23,13 @@ def main():
             # "enforce_eager": True,
         }
 
-    test_llm_kwargs = get_llm_kwargs("spec")
-    # test_llm_kwargs = get_llm_kwargs("regular")
+    # test_llm_kwargs = get_llm_kwargs("spec")
+    test_llm_kwargs = get_llm_kwargs("regular")
 
     # llm = LLM(model=MODEL_NAME, **test_llm_kwargs, max_model_len=1024, seed=256)
-    llm = LLM(model=MODEL_NAME, **test_llm_kwargs, max_model_len=1024, seed=0)
+    llm = LLM(model=MODEL_NAME, **test_llm_kwargs, max_model_len=1024)
+
+    # llm = LLM(model=MODEL_NAME, **test_llm_kwargs, max_model_len=1024, seed=0)
 
     class ResponseSchema(BaseModel):
         clarifying_question: str
@@ -76,6 +78,7 @@ def main():
         assert "\n" not in generated_text
 
         # Parse to verify it is valid JSON
+        parsed_json = json.loads(generated_text, strict=False)
         parsed_json = json.loads(generated_text)
 
 

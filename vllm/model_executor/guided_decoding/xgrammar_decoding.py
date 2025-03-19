@@ -342,6 +342,7 @@ class XGrammarLogitsProcessor:
     skip_tokens_until_rollback: bool = field(default=False)
     last_n_tokens: list[deque] = field(default_factory=list)
     num_processed_tokens: int = field(default=0)
+    last_input_tokens_len: int = field(default=0)
 
     def __getstate__(self) -> dict[str, Any]:
         return {'config': self.config, 'reasoner': self.reasoner}
@@ -357,6 +358,7 @@ class XGrammarLogitsProcessor:
         self.skip_tokens_until_rollback = False
         self.last_n_tokens = []
         self.num_processed_tokens = 0
+        self.last_input_tokens_len = 0
 
     def _ensure_ctx(self):
         """Lazily initialize the processor in the worker process"""
@@ -404,23 +406,30 @@ class XGrammarLogitsProcessor:
                 self.batch_size, self.config.vocab_size)
 
         for i in range(len(self.matchers)):
-            diff = _find_last_match(tuple(self.last_n_tokens[i]),
-                                    input_ids[:-1])
-            print("diff:", diff)
-            if diff >= 0:
+            if self.num_processed_tokens > 0 and self.last_input_tokens_len >= len(
+                    input_ids):
+                diff = self.num_processed_tokens - len(input_ids) + 1
+                self.num_processed_tokens -= diff
+                diff_old = _find_last_match(tuple(self.last_n_tokens[i]),
+                                            input_ids[:-1])
+                # print(diff, diff_old)
+                # if diff != diff_old: print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+                # if diff >= 0:
                 self.matchers[i].rollback(diff)
                 for _ in range(diff):
                     self.last_n_tokens[i].pop()
                 self.skip_tokens_until_rollback = False
-                self.num_processed_tokens -= diff
 
         print(self.skip_tokens_until_rollback, self.num_processed_tokens,
-              len(input_ids), list(self.last_n_tokens[i]), input_ids[-10:])
+              self.last_input_tokens_len, len(input_ids),
+              list(self.last_n_tokens[i]), input_ids[-10:])
+
+        self.last_input_tokens_len = len(input_ids)
 
         if len(input_ids) - self.num_processed_tokens > 10:
             raise
 
-        spec_decoding_scoring = False
+        spec_decoding_scoring = True
         if len(input_ids) > 0:
             for i, matcher in enumerate(self.matchers):
                 if not matcher.is_terminated(
