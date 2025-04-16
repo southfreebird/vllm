@@ -45,12 +45,14 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.spec_decode.util import Timer
 
 from .utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
                     scatter_mm_placeholders)
@@ -63,6 +65,41 @@ else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 logger = init_logger(__name__)
+
+
+def _maybe_log_stage_times(
+    average_time_per_proposal_tok_ms: float,
+    scoring_time_ms: float,
+    verification_time_ms: float,
+    disable_log_stats: bool = False,
+) -> None:
+    if disable_log_stats:
+        return
+
+    logger.info(
+        "SpecDecodeWorker stage times: "
+        "proposal_time_ms=%.02f "
+        "scoring_time_ms=%.02f verification_time_ms=%.02f",
+        average_time_per_proposal_tok_ms, scoring_time_ms,
+        verification_time_ms)
+
+
+_last_metrics_collect_time: float = 0
+
+
+def _should_emit_logs():
+    rank = get_tp_group().rank
+    if rank != 0:
+        return False
+    
+    now = time.time()
+    collect_interval_s: float = 5.0
+    global _last_metrics_collect_time
+
+    if now - _last_metrics_collect_time >= collect_interval_s:
+        _last_metrics_collect_time = now
+        return True
+    return False
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
@@ -193,6 +230,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                  self.device)  # type: ignore
                     if self.speculative_config.method == "eagle3":
                         self.use_aux_hidden_state_outputs = True
+                elif self.speculative_config.method == "medusa":
+                    self.drafter = MedusaProposer(self.vllm_config,
+                                                 self.device)  # type: ignore
                 else:
                     raise ValueError("Unknown speculative decoding method: "
                                      f"{self.speculative_config.method}")
@@ -1146,6 +1186,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for k, v in self.intermediate_tensors.items()
             })
 
+        # with Timer() as verification_timer:
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(attn_metadata,
@@ -1242,6 +1283,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             scheduler_output,
         )
 
+        # with Timer() as scoring_timer:
         # Get the valid generated tokens.
         sampled_token_ids = sampler_output.sampled_token_ids
         max_gen_len = sampled_token_ids.shape[-1]
@@ -1258,6 +1300,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
 
+        # with Timer() as proposal_timer:
         if not self.use_spec_decode:
             # Speculative decoding is not enabled.
             spec_token_ids = None
@@ -1279,7 +1322,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     req_id = self.input_batch.req_ids[i]
                     req_state = self.requests[req_id]
                     seq_len = (req_state.num_computed_tokens +
-                               scheduler_output.num_scheduled_tokens[req_id])
+                            scheduler_output.num_scheduled_tokens[req_id])
                     next_token_id = req_state.get_token_id(seq_len)
                 next_token_ids.append(next_token_id)
             next_token_ids = torch.tensor(next_token_ids,
@@ -1337,9 +1380,40 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             spec_token_ids = draft_token_ids.tolist()
 
+        elif self.speculative_config.method == "medusa":
+            if spec_decode_metadata is None:
+                num_of_tokens = len(valid_sampled_token_ids)
+                target_hidden_states = hidden_states[[-1] * num_of_tokens, :]
+            else:
+                num_draft_tokens = spec_decode_metadata.num_draft_tokens
+
+                token_indices = [
+                    i * (n + 1) + len(valid_sampled_token_ids[i]) - 1 if n > 0 else 0
+                    for i, n in enumerate(num_draft_tokens)
+                ]
+
+                # print("token_indices:", token_indices)
+
+                target_hidden_states = hidden_states[token_indices, :]
+                # print("token_indices", token_indices, target_hidden_states.shape)
+
+            draft_token_ids, draft_probs = self.drafter.propose(
+                hidden_states=target_hidden_states,
+                sampling_metadata=sampling_metadata,
+            )
+            spec_token_ids = draft_token_ids.cpu().tolist()
+            del draft_probs
+
         # Clear KVConnector state after all KVs are generated.
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()
+
+        # if _should_emit_logs():
+        #     stage_times = (proposal_timer.elapsed_time_ms,
+        #                 scoring_timer.elapsed_time_ms,
+        #                 verification_timer.elapsed_time_ms)
+
+        #     _maybe_log_stage_times(*stage_times)
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,

@@ -821,6 +821,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                 execute_model_req.seq_group_metadata_list, proposal_scores,
                 proposals, execute_model_req.num_lookahead_slots)
 
+        # print(accepted_token_ids, proposals.proposal_token_ids)
         stage_times = (proposal_timer.elapsed_time_ms / num_lookahead_slots,
                        scoring_timer.elapsed_time_ms,
                        verification_timer.elapsed_time_ms)
