@@ -36,6 +36,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.utils import is_spec_decode_supported
@@ -163,6 +164,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.drafter = NgramProposer(self.vllm_config)
                 elif self.speculative_config.method == "eagle":
                     self.drafter = EagleProposer(self.vllm_config,
+                                                 self.device)  # type: ignore
+                elif self.speculative_config.method == "medusa":
+                    self.drafter = MedusaProposer(self.vllm_config,
                                                  self.device)  # type: ignore
                 else:
                     raise ValueError("Unknown speculative decoding method: "
@@ -1208,6 +1212,36 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
             )
             spec_token_ids = draft_token_ids.tolist()
+            # TODO(woosuk): Cache draft_probs and use it for rejection sampling
+            # in the next step.
+            del draft_probs
+
+        elif self.speculative_config.method == "medusa":
+            if spec_decode_metadata is None:
+                target_hidden_states = hidden_states[[-1], :]
+            else:
+                num_draft_tokens = spec_decode_metadata.num_draft_tokens
+                num_rejected_tokens = [
+                    n + 1 - len(valid_sampled_token_ids[i]) if n > 0 else 0
+                    for i, n in enumerate(num_draft_tokens)
+                ]
+                print("valid_sampled_token_ids", valid_sampled_token_ids)
+                print("num_rejected_tokens:", num_rejected_tokens)
+                print("hidden_states:", hidden_states.shape)
+                
+                token_indices = [
+                    len(valid_sampled_token_ids[i]) - 1 if n > 0 else 0
+                    for i, n in enumerate(num_draft_tokens)
+                ]
+                
+                target_hidden_states = hidden_states[token_indices, :]
+                print("token_indices", token_indices, target_hidden_states.shape)
+
+            draft_token_ids, draft_probs = self.drafter.propose(
+                hidden_states=target_hidden_states,
+                sampling_metadata=sampling_metadata,
+            )
+            spec_token_ids = draft_token_ids
             # TODO(woosuk): Cache draft_probs and use it for rejection sampling
             # in the next step.
             del draft_probs

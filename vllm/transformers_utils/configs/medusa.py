@@ -14,8 +14,6 @@ class MedusaConfig(PretrainedConfig):
                  vocab_size: int = 32001,
                  num_heads: int = 5,
                  num_hidden_layers: int = 1,
-                 max_paths: int = 64,
-                 topk: int = 10,
                  truncated_vocab_size: Optional[int] = None,
                  **kwargs):
 
@@ -23,8 +21,6 @@ class MedusaConfig(PretrainedConfig):
         self.vocab_size = vocab_size
         self.num_heads = num_heads
         self.num_hidden_layers = num_hidden_layers
-        self.max_paths = max_paths
-        self.topk = topk
         self.max_seq_len = int(2**20)
         self.truncated_vocab_size = vocab_size if truncated_vocab_size is None\
             else truncated_vocab_size
