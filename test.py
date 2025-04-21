@@ -4,10 +4,10 @@ import os
 os.environ["VLLM_USE_V1"] = "1"
 
 if __name__ == "__main__":
-    MODEL_NAME = "JackFram/llama-68m"
-    SPEC_MODEL = "abhigoyal/vllm-medusa-llama-68m-random"
-    # MODEL_NAME = "meta-llama/Meta-Llama-3-8B-Instruct"
-    # SPEC_MODEL = "./test-medusa/"
+    # MODEL_NAME = "JackFram/llama-68m"
+    # SPEC_MODEL = "abhigoyal/vllm-medusa-llama-68m-random"
+    MODEL_NAME = "meta-llama/Meta-Llama-3-8B-Instruct"
+    SPEC_MODEL = "./test-medusa/"
 
     llm = LLM(
         model=MODEL_NAME,

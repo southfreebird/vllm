@@ -1,17 +1,17 @@
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
-from vllm.forward_context import set_forward_context
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.model_loader.loader import get_model_loader
+from vllm.model_executor.model_loader.utils import set_default_torch_dtype
+from vllm.model_executor.models.utils import AutoWeightsLoader, maybe_prefix
+
 
 class MedusaProposer:
-    
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -20,27 +20,29 @@ class MedusaProposer:
         self._speculative_config = vllm_config.speculative_config
         self._model_config = self._speculative_config.draft_model_config
         self._parallel_config = self._speculative_config.draft_parallel_config
-        
+        self._load_config = vllm_config.load_config
+
         hidden_size = self._model_config.get_hidden_size()
         num_layers = self._model_config.get_num_layers(self._parallel_config)
         num_speculative_tokens = self._speculative_config.num_speculative_tokens
         orig_vocab_size = self._model_config.get_vocab_size()
 
-        # TODO: Remove convertation here
-        self.blocks = nn.ModuleList([
-            MedusaModel(
-                hidden_size=hidden_size,
-                num_layers=num_layers).to(device).to(torch.float16)
-            for _ in range(num_speculative_tokens)
-        ])
-        self.lm_heads = nn.ModuleList([
-            ParallelLMHead(
-                orig_vocab_size,
-                hidden_size,
-                org_num_embeddings=orig_vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
-            ).to(device).to(torch.float16) for _ in range(num_speculative_tokens)
-        ])
+        with set_default_torch_dtype(self._model_config.dtype), set_current_vllm_config(
+                    vllm_config):
+            self.blocks = nn.ModuleList([
+                ResidualBlock(
+                    hidden_size=hidden_size,
+                    num_layers=num_layers).to(device)
+                for _ in range(num_speculative_tokens)
+            ])
+            self.lm_heads = nn.ModuleList([
+                ParallelLMHead(
+                    orig_vocab_size,
+                    hidden_size,
+                    org_num_embeddings=orig_vocab_size,
+                    padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+                ).to(device) for _ in range(num_speculative_tokens)
+            ])
         self.logits_processor = LogitsProcessor(vocab_size=orig_vocab_size)
 
     def forward(
@@ -67,7 +69,7 @@ class MedusaProposer:
             for i in range(batch_size):
                 draft_token_ids_list[i].append(draft_token_ids[i])
                 draft_probs_list[i].append(probs[i])
-            print(draft_token_ids_list)
+            # print(draft_token_ids_list)
         # TODO: mb stack before output
         return draft_token_ids_list, draft_probs_list
 
@@ -117,9 +119,34 @@ class MedusaProposer:
         )
 
     def load_model(self, target_model: nn.Module) -> None:
-        pass
-        
-        
+        loader = get_model_loader(self._load_config)
+        weights = loader._get_all_weights(self._model_config, self.blocks)
+        model_weights = {}
+        lm_heads_weights = {}
+
+        loader = AutoWeightsLoader(
+            self.blocks,
+            skip_prefixes=None,
+        )
+        loader_lm = AutoWeightsLoader(
+            self.lm_heads,
+            skip_prefixes=None,
+        )
+
+        for name, loaded_weight in weights:
+            if int(name.split(".")[1]) >= self._speculative_config.num_speculative_tokens:
+                continue
+
+            if "lm_head" not in name:
+                name = name[len("blocks."):]
+                model_weights[name] = loaded_weight
+            else:
+                name = name[len("lm_heads."):]
+                lm_heads_weights[name] = loaded_weight
+
+        loader.load_weights(model_weights.items())
+        loader_lm.load_weights(lm_heads_weights.items())
+
 
 class ResidualBlock(nn.Module):
     def __init__(self, hidden_size: int,
@@ -132,8 +159,6 @@ class ResidualBlock(nn.Module):
             for _ in range(num_layers)
         ])
         self.act = nn.SiLU()
-        
-        
 
     def forward(
         self,
@@ -142,6 +167,3 @@ class ResidualBlock(nn.Module):
         for layer in self.layers:
             hidden_states = hidden_states + self.act(layer(hidden_states))
         return hidden_states
-    
-    
-
