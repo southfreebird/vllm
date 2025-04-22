@@ -51,8 +51,8 @@ class MedusaProposer:
         sampling_metadata: SamplingMetadata
     ) -> list[torch.Tensor]:
         batch_size = hidden_states.size(dim=0)
-        draft_token_ids_list = [[] * batch_size]
-        draft_probs_list = [[] * batch_size]
+        draft_token_ids_list = []
+        draft_probs_list = [[] for _ in range(batch_size)]
 
         for block, lm_head in zip(self.blocks, self.lm_heads):
             logits = block(hidden_states)
@@ -64,31 +64,34 @@ class MedusaProposer:
                 assert len(draft_token_ids_list) == 0
                 continue
             draft_token_ids, probs = self.sample(logits, sampling_metadata)
-            draft_token_ids = draft_token_ids.cpu()
+
             assert len(draft_token_ids) == batch_size
-            for i in range(batch_size):
-                draft_token_ids_list[i].append(draft_token_ids[i])
-                draft_probs_list[i].append(probs[i])
-            # print(draft_token_ids_list)
-        # TODO: mb stack before output
-        return draft_token_ids_list, draft_probs_list
+            draft_token_ids_list.append(draft_token_ids)
+
+        # [batch_size, num_speculative_tokens]
+        draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
+        # [batch_size, num_speculative_tokens, vocab_size]
+        # draft_probs = torch.stack(draft_probs_list, dim=1)
+        return draft_token_ids, draft_probs_list
 
     def sample(
         self,
-        logits: list[torch.Tensor],
+        logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if sampling_metadata.all_greedy:
-            # For greedy requests, draft_probs is not used in rejection sampling.
-            # Therefore, we can just return the logits.
-            probs = logits
-            next_token_ids = logits.argmax(dim=-1)
-            return next_token_ids, probs
+        # if sampling_metadata.all_greedy:
+        #     # For greedy requests, draft_probs is not used in rejection sampling.
+        #     # Therefore, we can just return the logits.
+        #     probs = logits
+        #     next_token_ids = logits.argmax(dim=-1)
+        #     return next_token_ids, probs
         
-        is_greedy = sampling_metadata.temperature == -1
-        temperature = torch.where(is_greedy, 1.0, sampling_metadata.temperature)
-        logits.div_(temperature.view(-1, 1))
-        probs = logits.softmax(dim=-1, dtype=torch.float32)
+        # is_greedy = sampling_metadata.temperature == -1
+        # is_greedy = torch.ones(1, dtype=torch.bool, device=logits.device)
+        
+        # temperature = torch.where(is_greedy, 1.0, sampling_metadata.temperature)
+        # logits.div_(torch.broadcast_to(temperature.view(-1, 1), logits.size()))
+        # probs = logits.softmax(dim=-1, dtype=torch.float32)
 
         # NOTE(woosuk): Currently, we ignore most of the sampling parameters in
         # generating the draft tokens. We only use the temperature. While this
@@ -96,16 +99,18 @@ class MedusaProposer:
         # of the generated tokens after rejection sampling.
 
         # TODO(woosuk): Consider seeds.
-        q = torch.empty_like(probs)
-        q.exponential_()
-        next_token_ids = probs.div_(q).argmax(dim=-1).view(-1)
-        if not sampling_metadata.all_random:
-            greedy_token_ids = probs.argmax(dim=-1)
-            next_token_ids = torch.where(
-                is_greedy,
-                greedy_token_ids,
-                next_token_ids,
-            )
+        # q = torch.empty_like(probs)
+        # q.exponential_()
+        # next_token_ids = probs.div_(q).argmax(dim=-1).view(-1)
+        # if not sampling_metadata.all_random:
+        #     greedy_token_ids = probs.argmax(dim=-1)
+        #     next_token_ids = torch.where(
+        #         is_greedy,
+        #         greedy_token_ids,
+        #         next_token_ids,
+        #     )
+        probs = logits
+        next_token_ids = probs.argmax(dim=-1)
         return next_token_ids, probs
 
     def propose(

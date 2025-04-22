@@ -7,5 +7,5 @@ vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
           --enable-prefix-caching \
           --enable-auto-tool-choice \
           --tool-call-parser llama3_json \
-          --speculative-config '{"model": "./test-medusa-new/", "num_speculative_tokens": 1, "disable_logprobs": false, "disable_log_stats": false, "disable_by_batch_size": 30}'
+          --speculative-config '{"model": "./test-medusa/", "num_speculative_tokens": 1, "disable_logprobs": false, "disable_log_stats": false, "disable_by_batch_size": 30, "method": "medusa"}'
         #   --speculative-config '{"model": "./test-medusa/", "num_speculative_tokens": 3, "disable_logprobs": false, "disable_log_stats": false, "disable_by_batch_size": 30, "draft_tensor_parallel_size": 1}'

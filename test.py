@@ -21,6 +21,9 @@ if __name__ == "__main__":
         seed=0,
     )
     
-    outputs = llm.generate(prompts=["Hi! How are you doing?"], use_tqdm=True)
+    outputs = llm.generate(prompts=[
+        "Hi! How are you doing?",
+        "Hi! What's new?",
+    ], use_tqdm=True)
     
     print(outputs[0].outputs[0].text)
