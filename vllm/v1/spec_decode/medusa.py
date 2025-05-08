@@ -6,7 +6,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.model_loader.loader import get_model_loader
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.models.utils import AutoWeightsLoader, maybe_prefix
 
