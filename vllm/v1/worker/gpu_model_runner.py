@@ -1396,10 +1396,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     for i, n in enumerate(num_draft_tokens)
                 ]
 
-                # print("token_indices:", token_indices)
-
                 target_hidden_states = hidden_states[token_indices, :]
-                # print("token_indices", token_indices, target_hidden_states.shape)
 
             draft_token_ids, draft_probs = self.drafter.propose(
                 hidden_states=target_hidden_states,
@@ -1407,7 +1404,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             spec_token_ids = draft_token_ids.cpu().tolist()
             del draft_probs
-        
+
         elif self.speculative_config.method == "mlp_speculator":
             if spec_decode_metadata is None:
                 num_of_tokens = len(valid_sampled_token_ids)
@@ -1415,20 +1412,42 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 num_draft_tokens = spec_decode_metadata.num_draft_tokens
 
-                num_rejected_tokens = [
-                    n + 1 - len(valid_sampled_token_ids[i]) if n > 0 else 0
-                    for i, n in enumerate(num_draft_tokens)
-                ]
+                # valid_sampled_token_ids = get_tp_group().broadcast_object_list(valid_sampled_token_ids, src=0)
+                # diff = [len(i) != len(j) for i, j in zip(true_valid_sampled_token_ids, valid_sampled_token_ids)]
+                # if any(diff):
+                #     print([len(valid_sampled_token_ids[i]) for i in range(len(num_draft_tokens))], [len(true_valid_sampled_token_ids[i]) for i in range(len(num_draft_tokens))])
+
+                scheduled_tokens = [scheduler_output.num_scheduled_tokens[i] for i in self.input_batch.req_ids]
+                offsets = [sum(scheduled_tokens[:i]) for i in range(len(num_draft_tokens))]
                 
+                # rank = get_tp_group().rank
+                # if rank == 0:
+                    # print([len(valid_sampled_token_ids[i]) for i in range(len(num_draft_tokens))], num_draft_tokens)      
+                    # compute_tokens = [self.requests[i].num_computed_tokens for i in self.input_batch.req_ids]
+                    # prompt_tokens = [self.requests[i].num_prompt_tokens for i in self.input_batch.req_ids]
+                    # num_tokens = [self.requests[i].num_tokens for i in self.input_batch.req_ids]
+                    # scheduled_tokens = [scheduler_output.num_scheduled_tokens[i] for i in self.input_batch.req_ids]
+                    # print("offsets", offsets, compute_tokens, prompt_tokens, num_tokens, scheduled_tokens)
+
                 token_indices = [
-                    i * (n + 1) + len(valid_sampled_token_ids[i]) - 1 if n > 0 else 0
-                    for i, n in enumerate(num_draft_tokens)
+                    o + len(valid_sampled_token_ids[i]) - 1 if n > 0 else o + scheduled_tokens[i] - 1
+                    for i, (n, o) in enumerate(zip(num_draft_tokens, offsets))
                 ]
 
-                # print("token_indices:", token_indices)
+                # token_indices = [
+                #     i * (n + 1) + len(valid_sampled_token_ids[i]) - 1 if n > 0 else 0
+                #     for i, n in enumerate(num_draft_tokens)
+                # ]
+
+                # if rank == 0:
+                #     print("token_indices:", token_indices, hidden_states.size())
+                #     print("token_indices_new:", token_indices_new)
+                #     print("logits_indices", logits_indices)
+                #     print("\n\n")
+
+                # print([len(valid_sampled_token_ids[i]) for i in range(len(num_draft_tokens))], token_indices)
 
                 target_hidden_states = hidden_states[token_indices, :]
-                # print("token_indices", token_indices, target_hidden_states.shape)
 
             next_token_ids: list[int] = []
             for i, token_ids in enumerate(valid_sampled_token_ids):
@@ -1452,7 +1471,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 hidden_states=target_hidden_states,
                 sampling_metadata=sampling_metadata,
             )
-            spec_token_ids = draft_token_ids.cpu().tolist()
+            spec_token_ids = draft_token_ids.tolist()
 
         # Clear KVConnector state after all KVs are generated.
         if has_kv_transfer_group():
@@ -1464,7 +1483,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         #                 verification_timer.elapsed_time_ms)
 
         #     _maybe_log_stage_times(*stage_times)
-
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,

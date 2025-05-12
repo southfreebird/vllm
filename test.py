@@ -1,4 +1,4 @@
-from vllm.entrypoints.llm import LLM
+from vllm.entrypoints.llm import LLM, SamplingParams
 
 import os
 os.environ["VLLM_USE_V1"] = "1"
@@ -7,7 +7,7 @@ if __name__ == "__main__":
     # MODEL_NAME = "JackFram/llama-68m"
     # SPEC_MODEL = "abhigoyal/vllm-medusa-llama-68m-random"
     MODEL_NAME = "meta-llama/Meta-Llama-3-8B-Instruct"
-    SPEC_MODEL = "./from_llama_v3.1_8b_instruct/mlp_based_lk/"
+    SPEC_MODEL = "./from_llama_v3.1_8b_instruct/mlp_based_lk_new/"
     # SPEC_MODEL = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
 
     llm = LLM(
@@ -22,10 +22,24 @@ if __name__ == "__main__":
         tensor_parallel_size=2,
         seed=0,
     )
+
+    sampling_params = SamplingParams(
+        temperature=0,
+        max_tokens=200,
+    )
     
-    outputs = llm.generate(prompts=[
-        "Hi! How are you doing?",
-        "Hi! What's new?",
-    ], use_tqdm=True)
-    
+    outputs = llm.generate(
+        prompts=[
+            "Hi! How are you doing?",
+            "What's new?",
+            "I'm a man in a hat ",
+            "Where's my mind?",
+        ],
+        use_tqdm=True,
+        sampling_params=sampling_params,
+    )
+
     print(outputs[0].outputs[0].text)
+    print(outputs[0].outputs[0].finish_reason)
+    print(outputs[0].outputs[0].stop_reason)
+    print(outputs[0].outputs[0].finished())

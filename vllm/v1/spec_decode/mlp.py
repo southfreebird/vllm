@@ -32,7 +32,7 @@ class MLPProposer:
         with set_default_torch_dtype(self._model_config.dtype), set_current_vllm_config(
                     vllm_config):
             self.blocks = nn.ModuleList([
-                MlpHeads(
+                MLPSpeculatorHeads(
                     hidden_size=hidden_size,
                     num_layers=num_layers).to(device)
                 for _ in range(num_speculative_tokens)
@@ -71,7 +71,6 @@ class MLPProposer:
         for i, (block, lm_head) in enumerate(zip(self.blocks, self.lm_heads)):
             next_token = input_ids if i == 0 else draft_token_ids_list[-1]
             input_embeds = self.embed_tokens(next_token)
-            # TODO: mb concat other way
             hidden_states = block(torch.cat((input_embeds, self.hidden_states[:batch_size, :]), dim=-1))
             logits = self.logits_processor(lm_head, hidden_states)
             if logits is None:
@@ -162,7 +161,8 @@ class MLPHead(nn.Module):
         hidden_states = self.norm(self.act(hidden_states))
         return hidden_states
 
-class MlpHeads(nn.Module):
+
+class MLPSpeculatorHeads(nn.Module):
     def __init__(self, hidden_size: int,
                  num_layers: int):
         super().__init__()
