@@ -1,7 +1,10 @@
 from vllm.entrypoints.llm import LLM, SamplingParams
+from torch.profiler import profile, record_function, ProfilerActivity, tensorboard_trace_handler
+
 
 import os
 os.environ["VLLM_USE_V1"] = "1"
+os.environ["VLLM_TORCH_PROFILER_DIR"] = "./vllm_profile"
 
 if __name__ == "__main__":
     # MODEL_NAME = "JackFram/llama-68m"
@@ -21,6 +24,7 @@ if __name__ == "__main__":
         },
         tensor_parallel_size=2,
         seed=0,
+        # enforce_eager=True,
     )
 
     sampling_params = SamplingParams(
@@ -28,16 +32,19 @@ if __name__ == "__main__":
         max_tokens=200,
     )
     
+    # llm.start_profile()
+
     outputs = llm.generate(
         prompts=[
             "Hi! How are you doing?",
-            "What's new?",
-            "I'm a man in a hat ",
-            "Where's my mind?",
+            # "What's new?",
+            # "I'm a man in a hat ",
+            # "Where's my mind?",
         ],
         use_tqdm=True,
         sampling_params=sampling_params,
     )
+    # llm.stop_profile()
 
     print(outputs[0].outputs[0].text)
     print(outputs[0].outputs[0].finish_reason)
