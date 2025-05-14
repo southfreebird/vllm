@@ -25,6 +25,7 @@ from openai.types import completion
 from openai.types.chat import chat_completion, chat_completion_chunk
 from transformers import AutoTokenizer
 from huggingface_hub import login
+import yt.wrapper as yt
 
 csv.field_size_limit(sys.maxsize)
 
@@ -404,6 +405,62 @@ class Dataset:
                         token_count=cur_prompt_len,
                     )
                 )
+        random.shuffle(prompts)
+        print(f"Got {len(prompts)} prompts", file=sys.stderr)
+        return Dataset(prompts, prompt_len)
+    
+    @staticmethod
+    def from_logs(prompt_len, tokenizer, prompts_limit: int = 500):
+        print("Downloading dataset", file=sys.stderr)
+        config = yt.default_config.get_config_from_env()
+        config["read_parallel"]["enable"] = True
+        yt_client = yt.YtClient(config=config)
+
+        # location = "yt://home/llm/tmp/asamarin/speculative_decoding/datasets/preprocessed/llama-3.3-70B-Instruct-1May-5May-eval"
+        location = "yt://home/llm/tmp/asamarin/speculative_decoding/datasets/preprocessed/Qwen3-235B-A22B-9May"
+
+        raw_records = [rec for rec in yt_client.read_table(location)]
+        print("Dataset downloaded", file=sys.stderr)
+        
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer)
+
+        def create_result_prompt(user_prompts, system_prompts):
+            if system_prompts:
+                if user_prompts:
+                    return [system_prompts[0], user_prompts[0]]
+                return [system_prompts[0]]
+            elif user_prompts:
+                return [user_prompts[0]]
+            return []
+
+        prompts = []
+        for record in raw_records:
+            messages = record["conversation"]
+
+            system_prompts = [example['text'] for example in messages if example["role"] == "system"]
+            user_prompts = [example['text'] for example in messages if example["role"] == "user"]
+
+            user_prompt_list = create_result_prompt(user_prompts, system_prompts)
+
+            if not user_prompt_list:
+                continue
+
+            if prompt_len and len(user_prompt_list[0]) > prompt_len * 10:
+                continue
+
+            user_prompt_text = "\n".join(user_prompt_list) if len(user_prompt_list) > 1 else user_prompt_list[0]
+            cur_prompt_len = len(tokenizer(user_prompt_text)["input_ids"])
+            if not prompt_len or 0.7 * prompt_len < cur_prompt_len < 1.3 * prompt_len:
+                prompts.append(
+                    Prompt(
+                        [{"role": "user", "content": user_prompt_text}],
+                        token_count=cur_prompt_len,
+                    )
+                )
+
+            if len(prompts) >= prompts_limit:
+                break
+
         random.shuffle(prompts)
         print(f"Got {len(prompts)} prompts", file=sys.stderr)
         return Dataset(prompts, prompt_len)
@@ -890,7 +947,7 @@ async def main():
         "-d",
         "--dataset",
         type=str,
-        default="dolly",
+        default="logs",
         help="Path to jsonl dataset. By default a dataset from hf will be downloaded.",
     )
     parser.add_argument(
@@ -968,6 +1025,10 @@ async def main():
     if args.dataset == "dolly":
         datasets = [
             Dataset.from_databricks_dolly(l, args.tokenizer) for l in args.prompt_len
+        ]
+    elif args.dataset == "logs":
+        datasets = [
+            Dataset.from_logs(l, args.tokenizer) for l in args.prompt_len
         ]
     else:
         datasets = [Dataset.from_file(args.dataset)]
