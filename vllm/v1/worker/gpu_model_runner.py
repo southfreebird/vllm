@@ -1407,8 +1407,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         elif self.speculative_config.method == "mlp_speculator":
             if spec_decode_metadata is None:
-                num_of_tokens = len(valid_sampled_token_ids)
-                target_hidden_states = hidden_states[[-1] * num_of_tokens, :]
+                target_hidden_states = hidden_states[:num_scheduled_tokens]
             else:
                 num_draft_tokens = spec_decode_metadata.num_draft_tokens
 
@@ -1445,7 +1444,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 #     print("logits_indices", logits_indices)
                 #     print("\n\n")
 
-                # print([len(valid_sampled_token_ids[i]) for i in range(len(num_draft_tokens))], token_indices)
+                print([len(valid_sampled_token_ids[i]) for i in range(len(num_draft_tokens))], token_indices)
 
                 target_hidden_states = hidden_states[token_indices, :]
 
@@ -1472,6 +1471,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
             )
             spec_token_ids = draft_token_ids.tolist()
+            print(spec_token_ids)
 
         # Clear KVConnector state after all KVs are generated.
         if has_kv_transfer_group():
