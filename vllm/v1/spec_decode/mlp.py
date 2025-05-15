@@ -31,11 +31,10 @@ class MLPProposer:
 
         self.max_num_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens)
-        
-        # self.use_cuda_graph = (self.vllm_config.compilation_config.level
-        #                        == CompilationLevel.PIECEWISE and
-        #                        not self.vllm_config.model_config.enforce_eager)
-        self.use_cuda_graph = False
+
+        self.use_cuda_graph = (self.vllm_config.compilation_config.level
+                               == CompilationLevel.PIECEWISE and
+                               not self.vllm_config.model_config.enforce_eager)
         self.cudagraph_batch_sizes = list(
             reversed(
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
