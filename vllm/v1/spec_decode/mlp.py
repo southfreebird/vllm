@@ -58,12 +58,12 @@ class MLPProposer:
             self.hidden_states = torch.zeros(
                 (self.max_num_tokens, hidden_size),
                 dtype=self._model_config.dtype,
-                device=device
+                device=device,
             )
             self.input_ids = torch.zeros(
                 self.max_num_tokens,
                 dtype=torch.int32,
-                device=device
+                device=device,
             )
     
         self.logits_processor = LogitsProcessor(vocab_size=orig_vocab_size)
@@ -153,7 +153,6 @@ class MLPProposer:
         for name, loaded_weight in weights:
             if int(name.split(".")[1]) >= self._speculative_config.num_speculative_tokens:
                 continue
-            
 
             if "lm_head" not in name:
                 name = name[len("blocks."):]
@@ -170,9 +169,9 @@ class MLPProposer:
         self,
         num_tokens: int,
     ) -> None:
-        for block in self.blocks:
-            with set_forward_context(None, self.vllm_config,
+        with set_forward_context(None, self.vllm_config,
                                     num_tokens=num_tokens):
+            for block in self.blocks:
                 block(
                     input_ids=self.input_ids[:num_tokens],
                     hidden_states=self.hidden_states[:num_tokens],
@@ -200,7 +199,7 @@ class MLPHead(nn.Module):
         return hidden_states
 
 
-# @support_torch_compile
+@support_torch_compile
 class MLPSpeculatorHead(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = "",):
         super().__init__()
@@ -230,33 +229,3 @@ class MLPSpeculatorHead(nn.Module):
             hidden_states = layer(hidden_states)
 
         return hidden_states
-
-
-"""
-(VllmWorker rank=0 pid=646949) Name: 0.layers.0.dense.weight, Tensor: torch.Size([4096, 8192])
-(VllmWorker rank=0 pid=646949) Name: 0.layers.0.norm.weight, Tensor: torch.Size([4096])
-(VllmWorker rank=0 pid=646949) Name: 0.embed_tokens.weight, Tensor: torch.Size([64128, 4096])
-(VllmWorker rank=0 pid=646949) Name: 1.layers.0.dense.weight, Tensor: torch.Size([4096, 8192])
-(VllmWorker rank=0 pid=646949) Name: 1.layers.0.norm.weight, Tensor: torch.Size([4096])
-(VllmWorker rank=0 pid=646949) Name: 2.layers.0.dense.weight, Tensor: torch.Size([4096, 8192])
-(VllmWorker rank=0 pid=646949) Name: 2.layers.0.norm.weight, Tensor: torch.Size([4096])
-
-assert_size_stride(arg0_1, (s0, ), (1, ))
-assert_size_stride(arg2_1, (64128, 4096), (4096, 1))
-assert_size_stride(arg3_1, (s0, 4096), (4096, 1))
-assert_size_stride(arg4_1, (4096, 8192), (8192, 1))
-assert_size_stride(arg5_1, (3072, 4096), (4096, 1))
-assert_size_stride(arg6_1, (s0, ), (1, ))
-assert_size_stride(arg7_1, (2048, 128), (128, 1))
-
-
-submod_0 = self.submod_0(l_input_ids_, l_self_modules_embed_tokens_parameters_weight_, l_hidden_states_, l_self_modules_layers_modules_0_modules_dense_parameters_weight_, l_self_modules_layers_modules_0_modules_norm_parameters_weight_
-submod_0 = self.submod_0(l_input_ids_, s0, l_self_modules_embed_tokens_parameters_weight_, l_hidden_states_, l_self_modules_layers_modules_0_modules_dense_parameters_weight_, l_self_modules_layers_modules_0_modules_norm_parameters_weight_);  l_input_ids_ = s0 = l_self_modules_embed_tokens_parameters_weight_ = l_hidden_states_ = l_self_modules_layers_modules_0_modules_dense_parameters_weight_ = l_self_modules_layers_modules_0_modules_norm_parameters_weight_ = None
-
-assert_size_stride(arg0_1, (s0, ), (1, ))
-assert_size_stride(arg2_1, (64128, 4096), (4096, 1))
-assert_size_stride(arg3_1, (s0, 4096), (4096, 1))
-assert_size_stride(arg4_1, (4096, 8192), (8192, 1))
-assert_size_stride(arg5_1, (4096, ), (1, ))
-
-"""
