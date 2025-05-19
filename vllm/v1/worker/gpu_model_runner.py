@@ -50,6 +50,7 @@ from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.mlp_based import MLPProposer
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
@@ -167,6 +168,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.drafter = MedusaProposer(
                         vllm_config=self.vllm_config,
                         device=self.device)  # type: ignore
+                elif self.speculative_config.method == "mlp_speculator":
+                    self.drafter = MLPProposer(self.vllm_config,
+                                               self.device)  # type: ignore
                 else:
                     raise ValueError("Unknown speculative decoding method: "
                                      f"{self.speculative_config.method}")
@@ -1427,7 +1431,54 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
             )
             spec_token_ids = draft_token_ids.tolist()
+        elif self.speculative_config.method == "mlp_speculator":
+            assert isinstance(self.drafter, MLPProposer)
+            if spec_decode_metadata is None:
+                num_of_tokens = len(valid_sampled_token_ids)
+                target_hidden_states = hidden_states[[-1] * num_of_tokens, :]
+            else:
+                num_draft_tokens = spec_decode_metadata.num_draft_tokens
 
+                scheduled_tokens = [
+                    scheduler_output.num_scheduled_tokens[i]
+                    for i in self.input_batch.req_ids
+                ]
+                offsets = [
+                    sum(scheduled_tokens[:i])
+                    for i in range(len(num_draft_tokens))
+                ]
+
+                token_indices = [
+                    o + len(valid_sampled_token_ids[i]) - 1 if n > 0 else o +
+                    scheduled_tokens[i] - 1
+                    for i, (n, o) in enumerate(zip(num_draft_tokens, offsets))
+                ]
+                target_hidden_states = hidden_states[token_indices, :]
+
+            next_token_ids: list[int] = []  # type: ignore
+            for i, token_ids in enumerate(valid_sampled_token_ids):
+                if token_ids:
+                    # Common case.
+                    next_token_id = token_ids[-1]
+                else:
+                    # Partial prefill (rare case).
+                    # Get the next token id from the request state.
+                    req_id = self.input_batch.req_ids[i]
+                    req_state = self.requests[req_id]
+                    seq_len = (req_state.num_computed_tokens +
+                               scheduler_output.num_scheduled_tokens[req_id])
+                    next_token_id = req_state.get_token_id(seq_len)
+                next_token_ids.append(next_token_id)
+            next_token_ids = torch.tensor(next_token_ids,
+                                          dtype=torch.int32,
+                                          device=self.device)
+
+            draft_token_ids = self.drafter.propose(
+                input_ids=next_token_ids,
+                hidden_states=target_hidden_states,
+                sampling_metadata=sampling_metadata,
+            )
+            spec_token_ids = draft_token_ids.tolist()
         # Clear KVConnector state after all KVs are generated.
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()
@@ -1742,6 +1793,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             if self.use_spec_decode and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)
+                self.drafter.dummy_run(num_tokens)
+            elif self.use_spec_decode and \
+                self.speculative_config.method in ('mlp_speculator'):
+                assert isinstance(self.drafter, MLPProposer)
                 self.drafter.dummy_run(num_tokens)
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
