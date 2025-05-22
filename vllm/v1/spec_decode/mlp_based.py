@@ -31,6 +31,9 @@ class MLPProposer:
         num_speculative_tokens = self._speculative_config.num_speculative_tokens
         orig_vocab_size = self._model_config.get_vocab_size()
 
+        hf_config = self.vllm_config.speculative_config.draft_model_config.hf_config
+        self.original_lm_head = getattr(hf_config, "original_lm_head", False)
+
         self.max_num_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens)
 
@@ -49,14 +52,22 @@ class MLPProposer:
                                   prefix=prefix).to(device)
                 for _ in range(num_speculative_tokens)
             ])
-            self.lm_heads = nn.ModuleList([
-                ParallelLMHead(
+            if self.original_lm_head:
+                self.lm_heads = ParallelLMHead(
                     orig_vocab_size,
                     hidden_size,
                     org_num_embeddings=orig_vocab_size,
                     padding_size=DEFAULT_VOCAB_PADDING_SIZE,
-                ).to(device) for _ in range(num_speculative_tokens)
-            ])
+                ).to(device)
+            else:
+                self.lm_heads = nn.ModuleList([
+                    ParallelLMHead(
+                        orig_vocab_size,
+                        hidden_size,
+                        org_num_embeddings=orig_vocab_size,
+                        padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+                    ).to(device) for _ in range(num_speculative_tokens)
+                ])
 
             self.hidden_states = torch.zeros(
                 (self.max_num_tokens, hidden_size),
@@ -98,7 +109,7 @@ class MLPProposer:
 
         self.hidden_states[:batch_size, :] = hidden_states
 
-        for i, (block, lm_head) in enumerate(zip(self.blocks, self.lm_heads)):
+        for i, block in enumerate(self.blocks):
             next_token = input_ids if i == 0 else draft_token_ids_list[-1].int(
             )
 
@@ -109,6 +120,10 @@ class MLPProposer:
                                      num_tokens=num_input_tokens):
                 hidden_states = block(self.input_ids[:num_input_tokens],
                                       self.hidden_states[:num_input_tokens, :])
+            if self.original_lm_head:
+                lm_head = self.lm_heads
+            else:
+                lm_head = self.lm_heads[i]
             logits = self.logits_processor(lm_head, hidden_states)
             if logits is None:
                 # _logits should only be None on rank > 0, in which case
@@ -135,6 +150,9 @@ class MLPProposer:
         for block in self.blocks:
             block.embed_tokens = target_model.model.embed_tokens
 
+        if self.original_lm_head:
+            self.lm_heads = target_model.lm_head
+
         model_weights = {}
         lm_heads_weights = {}
 
@@ -142,25 +160,31 @@ class MLPProposer:
             self.blocks,
             skip_prefixes=None,
         )
-        loader_lm = AutoWeightsLoader(
-            self.lm_heads,
-            skip_prefixes=None,
-        )
+        if not self.original_lm_head:
+            loader_lm = AutoWeightsLoader(
+                self.lm_heads,
+                skip_prefixes=None,
+            )
 
         for name, loaded_weight in weights:
             if int(name.split(".")
                    [1]) >= self._speculative_config.num_speculative_tokens:
                 continue
 
-            if "lm_head" not in name:
+            if self.original_lm_head:
                 name = name[len("blocks."):]
                 model_weights[name] = loaded_weight
             else:
-                name = name[len("lm_heads."):]
-                lm_heads_weights[name] = loaded_weight
+                if "lm_head" not in name:
+                    name = name[len("blocks."):]
+                    model_weights[name] = loaded_weight
+                else:
+                    name = name[len("lm_heads."):]
+                    lm_heads_weights[name] = loaded_weight
 
         loader.load_weights(model_weights.items())
-        loader_lm.load_weights(lm_heads_weights.items())
+        if not self.original_lm_head:
+            loader_lm.load_weights(lm_heads_weights.items())
 
     @torch.inference_mode()
     def dummy_run(
@@ -191,7 +215,7 @@ class MLPHead(nn.Module):
                                bias=False)
 
         self.act = nn.GELU()
-        self.norm = nn.RMSNorm(self.config.hidden_size, eps=1e-6)
+        self.outputs_norm = nn.RMSNorm(self.config.hidden_size, eps=1e-6)
 
     def forward(
         self,
@@ -199,7 +223,7 @@ class MLPHead(nn.Module):
     ) -> torch.Tensor:
         hidden_states = self.dense(hidden_states)
         hidden_states = self.act(hidden_states)
-        hidden_states = self.norm(hidden_states)
+        hidden_states = self.outputs_norm(hidden_states)
         return hidden_states
 
 
@@ -220,6 +244,8 @@ class MLPSpeculatorHead(nn.Module):
             for _ in range(self.config.num_hidden_layers)
         ])
 
+        self.embeddings_norm = nn.RMSNorm(self.config.hidden_size, eps=1e-6)
+
         self.embed_tokens = VocabParallelEmbedding(
             self.config.vocab_size,
             self.config.hidden_size,
@@ -232,6 +258,7 @@ class MLPSpeculatorHead(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         input_embeds = self.embed_tokens(input_ids)
+        input_embeds = self.embeddings_norm(input_embeds)
         hidden_states = torch.cat((input_embeds, hidden_states), dim=-1)
 
         for layer in self.layers:
