@@ -46,14 +46,13 @@ from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
-from vllm.v1.spec_decode.mlp import MLPProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.mlp import MLPProposer
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.spec_decode.util import Timer
 
 from .utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
                     scatter_mm_placeholders)
@@ -92,7 +91,7 @@ def _should_emit_logs():
     rank = get_tp_group().rank
     if rank != 0:
         return False
-    
+
     now = time.time()
     collect_interval_s: float = 5.0
     global _last_metrics_collect_time
@@ -233,10 +232,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.use_aux_hidden_state_outputs = True
                 elif self.speculative_config.method == "medusa":
                     self.drafter = MedusaProposer(self.vllm_config,
-                                                 self.device)  # type: ignore
+                                                  self.device)  # type: ignore
                 elif self.speculative_config.method == "mlp_speculator":
                     self.drafter = MLPProposer(self.vllm_config,
-                                                 self.device)  # type: ignore
+                                               self.device)  # type: ignore
                 else:
                     raise ValueError("Unknown speculative decoding method: "
                                      f"{self.speculative_config.method}")
@@ -1326,7 +1325,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     req_id = self.input_batch.req_ids[i]
                     req_state = self.requests[req_id]
                     seq_len = (req_state.num_computed_tokens +
-                            scheduler_output.num_scheduled_tokens[req_id])
+                               scheduler_output.num_scheduled_tokens[req_id])
                     next_token_id = req_state.get_token_id(seq_len)
                 next_token_ids.append(next_token_id)
             next_token_ids = torch.tensor(next_token_ids,
@@ -1392,8 +1391,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_draft_tokens = spec_decode_metadata.num_draft_tokens
 
                 token_indices = [
-                    i * (n + 1) + len(valid_sampled_token_ids[i]) - 1 if n > 0 else 0
-                    for i, n in enumerate(num_draft_tokens)
+                    i * (n + 1) + len(valid_sampled_token_ids[i]) -
+                    1 if n > 0 else 0 for i, n in enumerate(num_draft_tokens)
                 ]
 
                 target_hidden_states = hidden_states[token_indices, :]
@@ -1407,7 +1406,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         elif self.speculative_config.method == "mlp_speculator":
             if spec_decode_metadata is None:
-                target_hidden_states = hidden_states[:num_scheduled_tokens]
+                num_of_tokens = len(valid_sampled_token_ids)
+                target_hidden_states = hidden_states[[-1] * num_of_tokens, :]
             else:
                 num_draft_tokens = spec_decode_metadata.num_draft_tokens
 
@@ -1416,36 +1416,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # if any(diff):
                 #     print([len(valid_sampled_token_ids[i]) for i in range(len(num_draft_tokens))], [len(true_valid_sampled_token_ids[i]) for i in range(len(num_draft_tokens))])
 
-                scheduled_tokens = [scheduler_output.num_scheduled_tokens[i] for i in self.input_batch.req_ids]
-                offsets = [sum(scheduled_tokens[:i]) for i in range(len(num_draft_tokens))]
-                
+                scheduled_tokens = [
+                    scheduler_output.num_scheduled_tokens[i]
+                    for i in self.input_batch.req_ids
+                ]
+                offsets = [
+                    sum(scheduled_tokens[:i])
+                    for i in range(len(num_draft_tokens))
+                ]
+                # print([len(valid_sampled_token_ids[i]) for i in range(len(num_draft_tokens))])
+
                 # rank = get_tp_group().rank
                 # if rank == 0:
-                    # print([len(valid_sampled_token_ids[i]) for i in range(len(num_draft_tokens))], num_draft_tokens)      
-                    # compute_tokens = [self.requests[i].num_computed_tokens for i in self.input_batch.req_ids]
-                    # prompt_tokens = [self.requests[i].num_prompt_tokens for i in self.input_batch.req_ids]
-                    # num_tokens = [self.requests[i].num_tokens for i in self.input_batch.req_ids]
-                    # scheduled_tokens = [scheduler_output.num_scheduled_tokens[i] for i in self.input_batch.req_ids]
-                    # print("offsets", offsets, compute_tokens, prompt_tokens, num_tokens, scheduled_tokens)
+                # print([len(valid_sampled_token_ids[i]) for i in range(len(num_draft_tokens))], num_draft_tokens)
+                # compute_tokens = [self.requests[i].num_computed_tokens for i in self.input_batch.req_ids]
+                # prompt_tokens = [self.requests[i].num_prompt_tokens for i in self.input_batch.req_ids]
+                # num_tokens = [self.requests[i].num_tokens for i in self.input_batch.req_ids]
+                # scheduled_tokens = [scheduler_output.num_scheduled_tokens[i] for i in self.input_batch.req_ids]
+                # print("offsets", offsets, compute_tokens, prompt_tokens, num_tokens, scheduled_tokens)
 
                 token_indices = [
-                    o + len(valid_sampled_token_ids[i]) - 1 if n > 0 else o + scheduled_tokens[i] - 1
+                    o + len(valid_sampled_token_ids[i]) - 1 if n > 0 else o +
+                    scheduled_tokens[i] - 1
                     for i, (n, o) in enumerate(zip(num_draft_tokens, offsets))
                 ]
-
-                # token_indices = [
-                #     i * (n + 1) + len(valid_sampled_token_ids[i]) - 1 if n > 0 else 0
-                #     for i, n in enumerate(num_draft_tokens)
-                # ]
-
-                # if rank == 0:
-                #     print("token_indices:", token_indices, hidden_states.size())
-                #     print("token_indices_new:", token_indices_new)
-                #     print("logits_indices", logits_indices)
-                #     print("\n\n")
-
-                print([len(valid_sampled_token_ids[i]) for i in range(len(num_draft_tokens))], token_indices)
-
                 target_hidden_states = hidden_states[token_indices, :]
 
             next_token_ids: list[int] = []
@@ -1459,7 +1453,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     req_id = self.input_batch.req_ids[i]
                     req_state = self.requests[req_id]
                     seq_len = (req_state.num_computed_tokens +
-                            scheduler_output.num_scheduled_tokens[req_id])
+                               scheduler_output.num_scheduled_tokens[req_id])
                     next_token_id = req_state.get_token_id(seq_len)
                 next_token_ids.append(next_token_id)
             next_token_ids = torch.tensor(next_token_ids,
@@ -1470,8 +1464,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 hidden_states=target_hidden_states,
                 sampling_metadata=sampling_metadata,
             )
+            # print(next_token_ids.size(), target_hidden_states.size(), draft_token_ids.size())
             spec_token_ids = draft_token_ids.tolist()
-            print(spec_token_ids)
 
         # Clear KVConnector state after all KVs are generated.
         if has_kv_transfer_group():
