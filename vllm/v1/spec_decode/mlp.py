@@ -2,8 +2,10 @@
 import torch
 import torch.nn as nn
 
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CompilationLevel, VllmConfig, set_current_vllm_config
+from vllm.config import (CompilationLevel, VllmConfig,
+                         get_layers_from_vllm_config, set_current_vllm_config)
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -96,6 +98,9 @@ class MLPProposer:
         # for name, param in self.lm_heads.named_parameters():
         #     print(f"Name: {name}, Tensor: {param.shape}")
         # print()
+
+        self.attn_layer_name = list(
+            get_layers_from_vllm_config(self.vllm_config, Attention).keys())[0]
 
         model_weights = {}
 

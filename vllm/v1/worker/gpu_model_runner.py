@@ -20,7 +20,8 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (
-    get_pp_group, graph_capture, prepare_communication_buffer_for_model)
+    get_pp_group, get_tp_group, graph_capture,
+    prepare_communication_buffer_for_model)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -1416,14 +1417,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # if any(diff):
                 #     print([len(valid_sampled_token_ids[i]) for i in range(len(num_draft_tokens))], [len(true_valid_sampled_token_ids[i]) for i in range(len(num_draft_tokens))])
 
-                scheduled_tokens = [
-                    scheduler_output.num_scheduled_tokens[i]
-                    for i in self.input_batch.req_ids
-                ]
-                offsets = [
-                    sum(scheduled_tokens[:i])
-                    for i in range(len(num_draft_tokens))
-                ]
+                # scheduled_tokens = [
+                #     scheduler_output.num_scheduled_tokens[i]
+                #     for i in self.input_batch.req_ids
+                # ]
+                # offsets = [
+                #     sum(scheduled_tokens[:i])
+                #     for i in range(len(num_draft_tokens))
+                # ]
+
                 # print([len(valid_sampled_token_ids[i]) for i in range(len(num_draft_tokens))])
 
                 # rank = get_tp_group().rank
@@ -1435,11 +1437,35 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # scheduled_tokens = [scheduler_output.num_scheduled_tokens[i] for i in self.input_batch.req_ids]
                 # print("offsets", offsets, compute_tokens, prompt_tokens, num_tokens, scheduled_tokens)
 
-                token_indices = [
-                    o + len(valid_sampled_token_ids[i]) - 1 if n > 0 else o +
-                    scheduled_tokens[i] - 1
-                    for i, (n, o) in enumerate(zip(num_draft_tokens, offsets))
+                # token_indices_old = [
+                #     o + len(valid_sampled_token_ids[i]) - 1 if n > 0 else o +
+                #     scheduled_tokens[i] - 1
+                #     for i, (n, o) in enumerate(zip(num_draft_tokens, offsets))
+                # ]
+
+                num_rejected_tokens = [
+                    n + 2 - len(valid_sampled_token_ids[i]) if n > 0 else 1
+                    for i, n in enumerate(num_draft_tokens)
                 ]
+
+                num_rejected_tokens = torch.tensor(
+                    num_rejected_tokens,
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+
+                draft_attn_metadata = attn_metadata[
+                    self.drafter.attn_layer_name]
+                offsets = draft_attn_metadata.query_start_loc
+                token_indices = offsets[1:] - num_rejected_tokens
+
+                # rank = get_tp_group().rank
+                # if rank == 0:
+                #     print("token_indices", token_indices)
+                #     # print("token_indices_old", token_indices_old)
+                #     # print(draft_attn_metadata.query_start_loc, num_rejected_tokens)
+                #     print()
+
                 target_hidden_states = hidden_states[token_indices, :]
 
             next_token_ids: list[int] = []
