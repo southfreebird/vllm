@@ -1439,20 +1439,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 num_draft_tokens = spec_decode_metadata.num_draft_tokens
 
-                scheduled_tokens = [
-                    scheduler_output.num_scheduled_tokens[i]
-                    for i in self.input_batch.req_ids
-                ]
-                offsets = [
-                    sum(scheduled_tokens[:i])
-                    for i in range(len(num_draft_tokens))
+                # We adding additional +1 here to avoid making iton GPU further
+                # to minimize the overhead to launching GPU operations.
+                num_rejected_tokens = [
+                    n + 2 - len(valid_sampled_token_ids[i]) if n > 0 else 1
+                    for i, n in enumerate(num_draft_tokens)
                 ]
 
-                token_indices = [
-                    o + len(valid_sampled_token_ids[i]) - 1 if n > 0 else o +
-                    scheduled_tokens[i] - 1
-                    for i, (n, o) in enumerate(zip(num_draft_tokens, offsets))
-                ]
+                num_rejected_tokens = torch.tensor(
+                    num_rejected_tokens,
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+
+                draft_attn_metadata = attn_metadata[
+                    self.drafter.attn_layer_name]
+                offsets = draft_attn_metadata.query_start_loc
+                token_indices = offsets[1:] - num_rejected_tokens
+
                 target_hidden_states = hidden_states[token_indices, :]
 
             next_token_ids: list[int] = []  # type: ignore

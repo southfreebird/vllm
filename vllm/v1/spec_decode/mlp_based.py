@@ -2,8 +2,10 @@
 import torch
 import torch.nn as nn
 
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CompilationLevel, VllmConfig, set_current_vllm_config
+from vllm.config import (CompilationLevel, VllmConfig,
+                         get_layers_from_vllm_config, set_current_vllm_config)
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -28,11 +30,6 @@ class MLPProposer:
         self._load_config = vllm_config.load_config
 
         hidden_size = self._model_config.get_hidden_size()
-        num_speculative_tokens = self._speculative_config.num_speculative_tokens
-        orig_vocab_size = self._model_config.get_vocab_size()
-
-        hf_config = self.vllm_config.speculative_config.draft_model_config.hf_config
-        self.original_lm_head = getattr(hf_config, "original_lm_head", False)
 
         self.max_num_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens)
@@ -47,28 +44,8 @@ class MLPProposer:
         with set_default_torch_dtype(
                 self._model_config.dtype), set_current_vllm_config(
                     vllm_config):
-            self.blocks = nn.ModuleList([
-                MLPSpeculatorHead(vllm_config=vllm_config,
-                                  prefix=prefix).to(device)
-                for _ in range(num_speculative_tokens)
-            ])
-            if self.original_lm_head:
-                self.lm_heads = ParallelLMHead(
-                    orig_vocab_size,
-                    hidden_size,
-                    org_num_embeddings=orig_vocab_size,
-                    padding_size=DEFAULT_VOCAB_PADDING_SIZE,
-                ).to(device)
-            else:
-                self.lm_heads = nn.ModuleList([
-                    ParallelLMHead(
-                        orig_vocab_size,
-                        hidden_size,
-                        org_num_embeddings=orig_vocab_size,
-                        padding_size=DEFAULT_VOCAB_PADDING_SIZE,
-                    ).to(device) for _ in range(num_speculative_tokens)
-                ])
-
+            self.speculator = MLPSpeculatorHeads(vllm_config=vllm_config,
+                                                 prefix=prefix).to(device)
             self.hidden_states = torch.zeros(
                 (self.max_num_tokens, hidden_size),
                 dtype=self._model_config.dtype,
@@ -79,17 +56,6 @@ class MLPProposer:
                 dtype=torch.int32,
                 device=device,
             )
-
-        self.logits_processor = LogitsProcessor(vocab_size=orig_vocab_size)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> tuple[torch.Tensor]:
-        # Top1 sampling
-        next_token_ids = logits.argmax(dim=-1)
-        return next_token_ids
 
     def propose(
         self,
@@ -105,86 +71,44 @@ class MLPProposer:
         else:
             num_input_tokens = batch_size
 
-        draft_token_ids_list: list = []
-
         self.hidden_states[:batch_size, :] = hidden_states
-
-        for i, block in enumerate(self.blocks):
-            next_token = input_ids if i == 0 else draft_token_ids_list[-1].int(
-            )
-
-            self.input_ids[:batch_size] = next_token
-
-            with set_forward_context(None,
-                                     self.vllm_config,
-                                     num_tokens=num_input_tokens):
-                hidden_states = block(self.input_ids[:num_input_tokens],
-                                      self.hidden_states[:num_input_tokens, :])
-            if self.original_lm_head:
-                lm_head = self.lm_heads
-            else:
-                lm_head = self.lm_heads[i]
-            logits = self.logits_processor(lm_head, hidden_states)
-            if logits is None:
-                # _logits should only be None on rank > 0, in which case
-                # it should remain true for every lm_head
-                assert len(draft_token_ids_list) == 0
-                continue
-
-            self.hidden_states[:batch_size, :] = hidden_states[:batch_size, :]
-
-            draft_token_ids = self.sample(logits[:batch_size, :],
-                                          sampling_metadata)
-
-            assert len(draft_token_ids) == batch_size
-            draft_token_ids_list.append(draft_token_ids)
+        self.input_ids[:batch_size] = input_ids
+        with set_forward_context(None,
+                                 self.vllm_config,
+                                 num_tokens=num_input_tokens):
+            draft_token_ids = self.speculator(
+                self.input_ids[:num_input_tokens],
+                self.hidden_states[:num_input_tokens])
+            draft_token_ids = torch.stack(draft_token_ids, dim=-1)
 
         # [batch_size, num_speculative_tokens]
-        draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
-        return draft_token_ids
+        return draft_token_ids[:batch_size, :]
 
     def load_model(self, target_model: nn.Module) -> None:
         loader = get_model_loader(self._load_config)
-        weights = loader.get_all_weights(self._model_config, self.blocks)
+        weights = loader.get_all_weights(self._model_config, self.speculator)
 
-        for block in self.blocks:
+        for block in self.speculator.blocks:
             block.embed_tokens = target_model.model.embed_tokens
 
-        if self.original_lm_head:
-            self.lm_heads = target_model.lm_head
+        self.attn_layer_name = list(
+            get_layers_from_vllm_config(self.vllm_config, Attention).keys())[0]
 
         model_weights = {}
-        lm_heads_weights = {}
 
         loader = AutoWeightsLoader(
-            self.blocks,
+            self.speculator,
             skip_prefixes=None,
         )
-        if not self.original_lm_head:
-            loader_lm = AutoWeightsLoader(
-                self.lm_heads,
-                skip_prefixes=None,
-            )
 
         for name, loaded_weight in weights:
             if int(name.split(".")
                    [1]) >= self._speculative_config.num_speculative_tokens:
                 continue
 
-            if self.original_lm_head:
-                name = name[len("blocks."):]
-                model_weights[name] = loaded_weight
-            else:
-                if "lm_head" not in name:
-                    name = name[len("blocks."):]
-                    model_weights[name] = loaded_weight
-                else:
-                    name = name[len("lm_heads."):]
-                    lm_heads_weights[name] = loaded_weight
+            model_weights[name] = loaded_weight
 
         loader.load_weights(model_weights.items())
-        if not self.original_lm_head:
-            loader_lm.load_weights(lm_heads_weights.items())
 
     @torch.inference_mode()
     def dummy_run(
@@ -193,11 +117,10 @@ class MLPProposer:
     ) -> None:
         with set_forward_context(None, self.vllm_config,
                                  num_tokens=num_tokens):
-            for block in self.blocks:
-                block(
-                    input_ids=self.input_ids[:num_tokens],
-                    hidden_states=self.hidden_states[:num_tokens],
-                )
+            self.speculator(
+                input_ids=self.input_ids[:num_tokens],
+                hidden_states=self.hidden_states[:num_tokens],
+            )
 
 
 class MLPHead(nn.Module):
@@ -214,8 +137,9 @@ class MLPHead(nn.Module):
                                self.config.hidden_size,
                                bias=False)
 
+        eps = getattr(self.config, "outputs_norm_eps", 1e-6)
         self.act = nn.GELU()
-        self.outputs_norm = nn.RMSNorm(self.config.hidden_size, eps=1e-6)
+        self.outputs_norm = nn.RMSNorm(self.config.hidden_size, eps=eps)
 
     def forward(
         self,
@@ -227,7 +151,6 @@ class MLPHead(nn.Module):
         return hidden_states
 
 
-@support_torch_compile
 class MLPSpeculatorHead(nn.Module):
 
     def __init__(
@@ -244,7 +167,8 @@ class MLPSpeculatorHead(nn.Module):
             for _ in range(self.config.num_hidden_layers)
         ])
 
-        self.embeddings_norm = nn.RMSNorm(self.config.hidden_size, eps=1e-6)
+        eps = getattr(self.config, "embeddings_norm_eps", 1e-6)
+        self.embeddings_norm = nn.RMSNorm(self.config.hidden_size, eps=eps)
 
         self.embed_tokens = VocabParallelEmbedding(
             self.config.vocab_size,
@@ -265,3 +189,53 @@ class MLPSpeculatorHead(nn.Module):
             hidden_states = layer(hidden_states)
 
         return hidden_states
+
+
+@support_torch_compile
+class MLPSpeculatorHeads(nn.Module):
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.config = vllm_config. \
+            speculative_config.draft_model_config.hf_config
+
+        num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens  # noqa E501
+        dtype = vllm_config. \
+            speculative_config.draft_model_config.dtype
+
+        with set_default_torch_dtype(dtype), set_current_vllm_config(
+                vllm_config):
+            self.blocks = nn.ModuleList([
+                MLPSpeculatorHead(vllm_config=vllm_config, prefix=prefix)
+                for _ in range(num_speculative_tokens)
+            ])
+            self.lm_heads = nn.ModuleList([
+                ParallelLMHead(
+                    self.config.vocab_size,
+                    self.config.hidden_size,
+                    org_num_embeddings=self.config.vocab_size,
+                    padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+                ) for _ in range(num_speculative_tokens)
+            ])
+        self.logits_processor = LogitsProcessor(
+            vocab_size=self.config.vocab_size)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        result = []
+        for i, (block, lm_head) in enumerate(zip(self.blocks, self.lm_heads)):
+            hidden_states = block(
+                input_ids,
+                hidden_states,
+            )
+            logits = self.logits_processor(lm_head, hidden_states)
+            input_ids = logits.argmax(dim=-1)
+            result.append(input_ids)
+        return result
