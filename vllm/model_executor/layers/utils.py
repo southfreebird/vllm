@@ -45,12 +45,19 @@ def apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
     repetition_penalties: The repetition penalties of shape (num_seqs, )
     """
     num_seqs, vocab_size = logits.shape
+
     _, prompt_mask = get_token_bin_counts_and_mask(prompt_tokens_tensor,
                                                    vocab_size, num_seqs)
     output_bin_counts, output_mask = get_token_bin_counts_and_mask(
         output_tokens_tensor, vocab_size, num_seqs)
     repetition_penalties = repetition_penalties.unsqueeze(dim=1).repeat(
         1, vocab_size)
+
+    print(prompt_mask.size(), output_mask.size(), repetition_penalties.size())
+    print(prompt_mask.device, output_mask.device, repetition_penalties.device)
+    repetition_penalties = repetition_penalties.to(logits.device)
+    frequency_penalties = frequency_penalties.to(logits.device)
+    presence_penalties = presence_penalties.to(logits.device)
 
     # If token appears in prompt or output, apply, otherwise use 1.0 for no-op.
     penalties = torch.where(prompt_mask | output_mask, repetition_penalties,

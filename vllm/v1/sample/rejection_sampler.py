@@ -18,6 +18,73 @@ GREEDY_TEMPERATURE: tl.constexpr = -1
 # step. This value is chosen to be large enough to handle typical use cases.
 MAX_SPEC_LEN = 32
 
+from vllm.utils import is_pin_memory_available, make_tensor_with_pad
+
+
+def _convert_to_tensors(output_token_ids: list[list[int]], vocab_size: int,
+                        device: torch.device) -> torch.Tensor:
+    """
+    Convert the different list data structures to tensors.
+    """
+    output_tokens_tensor = make_tensor_with_pad(
+        output_token_ids,
+        # Use the value of vocab_size as a pad since we don't have a
+        # token_id of this value.
+        pad=vocab_size,
+        device="cpu",
+        dtype=torch.int64,
+        pin_memory=is_pin_memory_available(),
+    )
+    return output_tokens_tensor.to(device, non_blocking=True)
+
+
+def prepare_output_tokens(
+    num_drafts: list[int],
+    output_token_ids: list[list[int]],
+    draft_token_ids: torch.Tensor,
+    vocab_size: int,
+    presence_penalties: torch.Tensor,
+    frequency_penalties: torch.Tensor,
+    repetition_penalties: torch.Tensor,
+):
+    result_rows = []
+    out_presence_penalties = []
+    out_frequency_penalties = []
+    out_repetition_penalties = []
+    drafts_idx = 0
+    for i, num in enumerate(num_drafts):
+        base_value = torch.tensor(output_token_ids[i],
+                                  device='cpu',
+                                  dtype=torch.int64)
+
+        # Always add the base value as the first row if num_drafts for it is not 0
+        if num > 0:
+            result_rows.append(base_value)
+
+            out_presence_penalties.append(presence_penalties[i])
+            out_frequency_penalties.append(frequency_penalties[i])
+            out_repetition_penalties.append(repetition_penalties[i])
+
+            for j in range(num - 1):
+                # Take slices from 'drafts' for each progressive addition
+                current_draft_slice = draft_token_ids[drafts_idx:drafts_idx +
+                                                      j + 1].to('cpu')
+                combined_row = torch.cat((base_value, current_draft_slice))
+                result_rows.append(combined_row)
+
+                out_presence_penalties.append(presence_penalties[i])
+                out_frequency_penalties.append(frequency_penalties[i])
+                out_repetition_penalties.append(repetition_penalties[i])
+
+            drafts_idx += num
+
+    return (
+        _convert_to_tensors(result_rows, vocab_size, 'cuda:0'),
+        torch.stack(out_presence_penalties),
+        torch.stack(out_frequency_penalties),
+        torch.stack(out_repetition_penalties),
+    )
+
 
 class RejectionSampler(nn.Module):
     """
@@ -82,6 +149,61 @@ class RejectionSampler(nn.Module):
                 A tensor containing the final output token IDs.
         '''
         assert metadata.max_spec_len <= MAX_SPEC_LEN
+
+        _, vocab_size = target_logits.shape
+
+        output_token_ids = sampling_metadata.output_token_ids
+        prompt_token_ids = sampling_metadata.prompt_token_ids
+
+        print("output_token_ids", output_token_ids)
+        print("prompt_token_ids", prompt_token_ids)
+        print(metadata.num_draft_tokens)
+
+        num_draft_tokens = torch.tensor(metadata.num_draft_tokens,
+                                        device=prompt_token_ids.device)
+        prompt_token_ids = torch.repeat_interleave(prompt_token_ids,
+                                                   repeats=num_draft_tokens,
+                                                   dim=0)
+        prompt_token_ids = prompt_token_ids.to(target_logits.device)
+
+        print(output_token_ids, metadata.num_draft_tokens,
+              metadata.draft_token_ids)
+
+        print(
+            sampling_metadata.presence_penalties,
+            sampling_metadata.frequency_penalties,
+            sampling_metadata.repetition_penalties,
+        )
+
+        (
+            output_tokens_t,
+            presence_penalties,
+            frequency_penalties,
+            repetition_penalties,
+        ) = prepare_output_tokens(
+            num_draft_tokens,
+            output_token_ids,
+            metadata.draft_token_ids,
+            vocab_size,
+            sampling_metadata.presence_penalties,
+            sampling_metadata.frequency_penalties,
+            sampling_metadata.repetition_penalties,
+        )
+
+        apply_penalties(
+            target_logits,
+            prompt_token_ids,
+            output_tokens_t,
+            presence_penalties,
+            frequency_penalties,
+            repetition_penalties,
+        )
+
+        # TODO: apply_min_token_penalties
+        # TODO: apply_bad_words
+        # TODO: apply_allowed_token_ids
+        # TODO: apply_logits_bias -- inefficient
+
         # [num_tokens, vocab_size]
         # NOTE(woosuk): `target_logits` can be updated in place inside the
         # `compute_probs` function.
@@ -169,6 +291,18 @@ def rejection_sample(
         device=device,
     )
     output_token_ids.fill_(PLACEHOLDER_TOKEN_ID)
+
+    # rejection_greedy_sample_with_constraints(
+    #     draft_token_ids,
+    #     num_draft_tokens,
+    #     max_spec_len,
+    #     cu_num_draft_tokens,
+    #     draft_probs,
+    #     target_probs,
+    #     bonus_token_ids,
+    #     output_token_ids,
+    #     sampling_metadata,
+    # )
 
     if sampling_metadata.all_greedy:
         is_greedy = None
@@ -628,3 +762,154 @@ def sample_recovered_tokens_kernel(
         tl.store(
             target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id,
             orig_prob)
+
+
+# NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
+@triton.jit(do_not_specialize=["max_spec_len", "pos"])
+def rejection_greedy_sample_one_iter_kernel(
+    output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
+    rejected_ptr,  # [batch_size]
+    cu_num_draft_tokens_ptr,  # [batch_size]
+    draft_token_ids_ptr,  # [num_tokens]
+    target_argmax_ptr,  # [num_tokens]
+    bonus_token_ids_ptr,  # [batch_size]
+    is_greedy_ptr,  # [batch_size] or None
+    pos,
+    max_spec_len,
+):
+    req_idx = tl.program_id(0)
+    # FIXME(woosuk): Because is_greedy_ptr is not None at profiling run,
+    # re-compilation may happen during runtime when is_greedy_ptr is None.
+    if is_greedy_ptr is None:
+        is_greedy = True
+    else:
+        is_greedy = tl.load(is_greedy_ptr + req_idx)
+    if not is_greedy:
+        # Early exit for non-greedy sampling requests.
+        return
+
+    if req_idx == 0:
+        start_idx = 0
+    else:
+        start_idx = tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
+    end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
+    num_draft_tokens = end_idx - start_idx
+
+    # TODO: mb make combine it with last block
+    if pos >= num_draft_tokens:
+        # Early exit
+        bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
+        tl.store(
+            output_token_ids_ptr + req_idx * (max_spec_len + 1) +
+            num_draft_tokens, bonus_token_id)
+        return
+
+    rejected = tl.load(rejected_ptr + req_idx)
+    if rejected:
+        # Early exit for rejected outputs
+        return
+
+    if pos < num_draft_tokens:
+        draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
+        target_argmax_id = tl.load(target_argmax_ptr + start_idx + pos)
+        tl.store(output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos,
+                 target_argmax_id)
+        if draft_token_id != target_argmax_id:
+            # Reject.
+            rejected = True
+
+    last_position = pos == num_draft_tokens - 1
+
+    if not rejected and last_position:
+        # If all tokens are accepted, append the bonus token.
+        bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
+        tl.store(
+            output_token_ids_ptr + req_idx * (max_spec_len + 1) +
+            num_draft_tokens, bonus_token_id)
+
+    tl.store(rejected_ptr + req_idx, rejected)
+
+
+# # NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
+# @triton.jit(do_not_specialize=["replace_from", "replace_to"])
+# def expand_kernel(
+#     output_ptr,  # [num_tokens]
+#     input_ptr,  # [batch_size]
+#     cu_num_tokens_ptr,  # [batch_size]
+#     replace_from,
+#     replace_to,
+#     MAX_NUM_TOKENS: tl.constexpr,
+# ):
+#     req_idx = tl.program_id(0)
+#     if req_idx == 0:  # noqa: SIM108
+#         start_idx = 0
+#     else:
+#         start_idx = tl.load(cu_num_tokens_ptr + req_idx - 1)
+#     end_idx = tl.load(cu_num_tokens_ptr + req_idx)
+#     num_tokens = end_idx - start_idx
+
+#     src_val = tl.load(input_ptr + req_idx)
+#     src_val = tl.where(src_val == replace_from, replace_to, src_val)
+#     offset = tl.arange(0, MAX_NUM_TOKENS)
+#     tl.store(output_ptr + start_idx + offset,
+#              src_val,
+#              mask=offset < num_tokens)
+
+from vllm.model_executor.layers.utils import apply_penalties
+
+
+def rejection_greedy_sample_with_constraints(
+    # [num_tokens]
+    draft_token_ids: torch.Tensor,
+    # [batch_size]
+    num_draft_tokens: list[int],
+    max_spec_len: int,
+    # [batch_size]
+    cu_num_draft_tokens: torch.Tensor,
+    # [num_tokens, vocab_size]
+    draft_probs: Optional[torch.Tensor],
+    # [num_tokens, vocab_size]
+    target_probs: torch.Tensor,
+    # [batch_size, 1]
+    bonus_token_ids: torch.Tensor,
+    # [batch_size, max_spec_len + 1]
+    output_token_ids: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+):
+    batch_size = len(num_draft_tokens)
+    max_num_draft_tokens = max(num_draft_tokens)
+    print("cu_num_draft_tokens", cu_num_draft_tokens)
+    device = target_probs.device
+
+    is_greedy = None
+
+    rejected = torch.empty(
+        (batch_size, ),
+        dtype=torch.bool,
+        device=device,
+    )
+    logits_start_ids = torch.zeros_like(cu_num_draft_tokens)
+    logits_start_ids[1:] = cu_num_draft_tokens[:-1]
+
+    req_ids = [i for i, n in enumerate(num_draft_tokens) if n > 0]
+    for pos in range(max_num_draft_tokens):
+        logit_indices = torch.Tensor(
+            [logits_start_ids[i] + pos
+             for i in req_ids], ).to(device).to(torch.int32)
+
+        target_argmax = target_probs.argmax(dim=-1)
+
+        rejection_greedy_sample_one_iter_kernel[(batch_size, )](
+            output_token_ids,
+            rejected,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            target_argmax,
+            bonus_token_ids,
+            is_greedy,
+            pos,
+            max_spec_len,
+            num_warps=1,
+        )
+        # print(f"Iter: {pos}", output_token_ids, rejected)
+    print("Final:\n", output_token_ids)
