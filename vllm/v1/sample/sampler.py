@@ -179,14 +179,33 @@ class Sampler(nn.Module):
 
         return LogprobsTensors(indices, logprobs, token_ranks)
 
+    def _combine_outputs_with_spec_tokens(
+        self,
+        output_token_ids: list[list[int]],
+        spec_token_ids: list[list[int]],
+    ):
+        return [[*out, *spec]
+                for out, spec in zip(output_token_ids, spec_token_ids)]
+
     def apply_penalties(
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
+        if sampling_metadata.no_penalties and not sampling_metadata.min_tokens:
+            return logits
+
+        if len(sampling_metadata.last_spec_token_ids) > 0:
+            # Spec decoding enabled case, when we sample the bonus token.
+            output_token_ids = self._combine_outputs_with_spec_tokens(
+                sampling_metadata.output_token_ids,
+                sampling_metadata.last_spec_token_ids,
+            )
+        else:
+            output_token_ids = sampling_metadata.output_token_ids
+
         if sampling_metadata.min_tokens:
-            apply_min_token_penalties(logits,
-                                      sampling_metadata.output_token_ids,
+            apply_min_token_penalties(logits, output_token_ids,
                                       sampling_metadata.min_tokens)
         if not sampling_metadata.no_penalties:
             assert sampling_metadata.prompt_token_ids is not None
@@ -196,7 +215,7 @@ class Sampler(nn.Module):
                 sampling_metadata.presence_penalties,
                 sampling_metadata.frequency_penalties,
                 sampling_metadata.repetition_penalties,
-                sampling_metadata.output_token_ids,
+                output_token_ids,
             )
         return logits
 
@@ -262,9 +281,18 @@ class Sampler(nn.Module):
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
         if sampling_metadata.bad_words_token_ids:
+            # TODO: Do not duplicate this logic
+            if len(sampling_metadata.last_spec_token_ids) > 0:
+                # Spec decoding enabled case, when we sample the bonus token.
+                output_token_ids = self._combine_outputs_with_spec_tokens(
+                    sampling_metadata.output_token_ids,
+                    sampling_metadata.last_spec_token_ids,
+                )
+            else:
+                output_token_ids = sampling_metadata.output_token_ids
             apply_bad_words(
                 logits,
                 sampling_metadata.bad_words_token_ids,
-                sampling_metadata.output_token_ids,
+                output_token_ids,
             )
         return logits

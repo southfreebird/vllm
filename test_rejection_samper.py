@@ -43,6 +43,7 @@ def create_sampling_metadata(
     else:
         assert temperature is not None
 
+    device = "cuda:0"
     return SamplingMetadata(
         temperature=temperature,
         all_greedy=all_greedy,
@@ -53,11 +54,13 @@ def create_sampling_metadata(
         generators=generators,
         max_num_logprobs=0,
         no_penalties=False,
-        prompt_token_ids=torch.tensor([[5, 6, 7], [6, 7, 8], [7, 8, 9]]),
-        frequency_penalties=torch.tensor([2.0, 2.0, 2.0]),
-        presence_penalties=torch.tensor([0.0, 0.0, 0.0]),
-        repetition_penalties=torch.tensor([1.0, 1.0, 1.0]),
+        prompt_token_ids=torch.tensor([[5, 6, 7], [6, 7, 8], [7, 8, 9]],
+                                      device=device),
+        frequency_penalties=torch.tensor([1.5, 1.5, 1.5], device=device),
+        presence_penalties=torch.tensor([0.0, 0.0, 0.0], device=device),
+        repetition_penalties=torch.tensor([1.0, 1.0, 1.0], device=device),
         output_token_ids=[[2], [3], [4]],
+        last_spec_token_ids=[[1, 1, 1], [], [1, 1, 1]],
         min_tokens={},
         logit_bias=[None],
         allowed_token_ids_mask=None,

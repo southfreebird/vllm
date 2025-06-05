@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+from typing import Optional
 
 import torch
 
@@ -28,11 +29,16 @@ def _apply_bad_words_single_batch(
             logits[last_token_id] = _SMALLEST_LOGIT
 
 
+# TODO: Test me!
 def apply_bad_words(
     logits: torch.Tensor,
     bad_words_token_ids: dict[int, list[list[int]]],
     past_tokens_ids: list[list[int]],
+    num_draft_tokens: Optional[list[int]] = None,
 ) -> None:
+    if not num_draft_tokens:
+        num_draft_tokens = [1] * len(past_tokens_ids)
     for i, bad_words_ids in bad_words_token_ids.items():
-        _apply_bad_words_single_batch(logits[i], bad_words_ids,
-                                      past_tokens_ids[i])
+        for s in num_draft_tokens[i]:
+            _apply_bad_words_single_batch(logits[i + s], bad_words_ids,
+                                          past_tokens_ids[i + s])

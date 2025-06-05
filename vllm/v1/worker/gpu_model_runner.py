@@ -478,6 +478,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 end_token_index += len(spec_token_ids)
                 self.input_batch.token_ids_cpu[
                     req_index, start_index:end_token_index] = spec_token_ids
+                self.input_batch.last_spec_token_ids[
+                    req_index] = spec_token_ids
             # NOTE(woosuk): `num_tokens` here may include spec decode tokens.
             self.input_batch.num_tokens[req_index] = end_token_index
 
@@ -1127,6 +1129,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             return self.kv_connector_no_forward(scheduler_output)
 
+        print("output_token_ids2",
+              self.input_batch.sampling_metadata.output_token_ids,
+              self.input_batch.sampling_metadata.last_spec_token_ids)
+
         # Prepare the decoder inputs.
         attn_metadata, logits_indices, spec_decode_metadata = (
             self._prepare_inputs(scheduler_output))
@@ -1487,6 +1493,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()
 
+        print("spec_token_ids", spec_token_ids)
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
@@ -1837,6 +1844,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             presence_penalties=dummy_tensors(0.1),
             repetition_penalties=dummy_tensors(0.1),
             output_token_ids=[[] for _ in range(num_reqs)],
+            last_spec_token_ids=[[] for _ in range(num_reqs)],
             min_tokens={},
             logit_bias=[None for _ in range(num_reqs)],
             allowed_token_ids_mask=None,
